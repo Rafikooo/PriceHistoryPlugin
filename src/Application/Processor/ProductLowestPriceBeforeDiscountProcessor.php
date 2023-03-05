@@ -45,7 +45,7 @@ final class ProductLowestPriceBeforeDiscountProcessor implements ProductLowestPr
             return;
         }
 
-        $lowestPriceBeforeDiscount = $this->channelPricingLogEntryRepository->findLowestPricesBeforeDiscount(
+        $lowestPriceBeforeDiscount = $this->channelPricingLogEntryRepository->findLowestPriceBeforeDiscount(
             $channelPricing,
             $channel->getLowestPriceForDiscountedProductsCheckingPeriod(),
         );

@@ -27,7 +27,7 @@ interface ChannelPricingLogEntryRepositoryInterface extends RepositoryInterface
 
     public function bulkUpdateLowestPricesBeforeDiscount(ChannelInterface $channel): void;
 
-    public function findLowestPricesBeforeDiscount(
+    public function findLowestPriceBeforeDiscount(
         ChannelPricingInterface $channelPricing,
         int $lowestPriceForDiscountedProductsCheckingPeriod,
     ): ?int;

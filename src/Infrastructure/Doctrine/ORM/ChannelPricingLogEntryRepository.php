@@ -51,8 +51,8 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
         $conn = $this->getEntityManager()->getConnection();
 
         $sql = sprintf(
-            'UPDATE sylius_channel_pricing scp SET scp.lowestPriceBeforeDiscount = (%s) WHERE scp.channel_code = :channelCode',
-            $this->getLowestPricesBeforeDiscountQuery(),
+            'UPDATE sylius_channel_pricing xd_a INNER JOIN (%s) xd_b ON xd_a.id = xd_b.id SET xd_a.lowestPriceBeforeDiscount = xd_b.lowestPriceInPeriod',
+            $this->getLowestPricesBeforeDiscountQuery(true) . ' WHERE scp.channel_code = :channelCode',
         );
 
         $stmt = $conn->prepare($sql);
@@ -62,13 +62,14 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
         ]);
     }
 
-    public function findLowestPricesBeforeDiscount(
+    public function findLowestPriceBeforeDiscount(
         ChannelPricingInterface $channelPricing,
         int $lowestPriceForDiscountedProductsCheckingPeriod,
     ): ?int {
         $conn = $this->getEntityManager()->getConnection();
 
-        $sql = $this->getLowestPricesBeforeDiscountQuery($channelPricing->getId());
+        $sql = $this->getLowestPricesBeforeDiscountQuery(false);
+        $sql .= ' WHERE scp.id = :channelPricingId';
 
         $result = $conn
             ->prepare($sql)
@@ -76,77 +77,87 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
                 'lowestPriceForDiscountedProductsCheckingPeriod' => $lowestPriceForDiscountedProductsCheckingPeriod,
                 'channelPricingId' => $channelPricing->getId(),
             ])
-            ->fetchOne()
+            ->fetchAllAssociative()[0] ?? null
         ;
 
-        if (false === $result || null === $result) {
+        if (!isset($result['lowestPriceInPeriod'])) {
             return null;
         }
 
         /** @phpstan-ignore-next-line cast mixed to int */
-        return (int) $result;
+        return (int) $result['lowestPriceInPeriod'];
     }
 
-    private function getLowestPricesBeforeDiscountQuery(int $channelPricingId = null): string
+    private function getLowestPricesBeforeDiscountQuery(bool $withIsDiscountedCondition): string
     {
-        if (null === $channelPricingId) {
-            $channelPricingId = 'scp.id';
-        }
-
-        $selectLowestPriceBeforeDiscount = sprintf(
-            'CASE
-                %s
-                WHEN lowestPriceSetInPeriod IS NULL THEN latestPriceSetBeyondPeriod
-                WHEN latestPriceSetBeyondPeriod IS NULL THEN lowestPriceSetInPeriod
-                ELSE LEAST(lowestPriceSetInPeriod, latestPriceSetBeyondPeriod)
-            END',
-            'scp.id' === $channelPricingId ? 'WHEN scp.original_price IS NULL OR scp.price >= scp.original_price THEN NULL' : '',
-        );
-
-        $startDateSql = "
-            SUBDATE(
-                (
-                    SELECT o.logged_at
-                    FROM sylius_price_history_channel_pricing_log_entry o
-                    WHERE o.channel_pricing_id = $channelPricingId
-                    ORDER BY o.id DESC
-                    LIMIT 1
-                ),
-                :lowestPriceForDiscountedProductsCheckingPeriod
-            )
-        ";
-
-        $lowestPriceSetInPeriod = "
-            SELECT query.price
-            FROM sylius_price_history_channel_pricing_log_entry query
-            WHERE
-                query.logged_at >= $startDateSql
+        $baseQuery = <<<SQL
+SELECT
+    (
+        CASE
+            WHEN lowestPriceSetInPeriod IS NULL THEN latestPriceSetBeyondPeriod
+            WHEN latestPriceSetBeyondPeriod IS NULL THEN lowestPriceSetInPeriod
+            ELSE LEAST(lowestPriceSetInPeriod, latestPriceSetBeyondPeriod)
+        END
+    ) price
+FROM (
+     SELECT
+         (
+             SELECT query.price
+             FROM sylius_price_history_channel_pricing_log_entry query
+             WHERE
+                query.logged_at >= SUBDATE(
+                    (
+                        SELECT o.logged_at
+                        FROM sylius_price_history_channel_pricing_log_entry o
+                        WHERE o.channel_pricing_id = scp.id
+                        ORDER BY o.id DESC
+                        LIMIT 1
+                    ),
+                    :lowestPriceForDiscountedProductsCheckingPeriod
+                )
                 AND query.id != (
                     SELECT subquery.id FROM sylius_price_history_channel_pricing_log_entry subquery
-                    WHERE subquery.channel_pricing_id = $channelPricingId
+                    WHERE subquery.channel_pricing_id = scp.id
                     ORDER BY subquery.id DESC
                     LIMIT 1
                 )
-                AND query.channel_pricing_id = $channelPricingId
-            ORDER BY query.price ASC
-            LIMIT 1
-        ";
+                AND query.channel_pricing_id = scp.id
+             ORDER BY query.price ASC
+             LIMIT 1
+         ) lowestPriceSetInPeriod,
+         (
+             SELECT query.price
+             FROM sylius_price_history_channel_pricing_log_entry query
+             WHERE
+                query.logged_at < SUBDATE(
+                    (
+                        SELECT o.logged_at
+                        FROM sylius_price_history_channel_pricing_log_entry o
+                        WHERE o.channel_pricing_id = scp.id
+                        ORDER BY o.id DESC
+                        LIMIT 1
+                    ),
+                    :lowestPriceForDiscountedProductsCheckingPeriod
+                )
+                AND query.channel_pricing_id = scp.id
+             ORDER BY query.id DESC
+             LIMIT 1
+         ) latestPriceSetBeyondPeriod
+) t
+SQL;
 
-        $latestPriceSetBeyondPeriod = "
-            SELECT query.price
-            FROM sylius_price_history_channel_pricing_log_entry query
-            WHERE
-                query.logged_at < $startDateSql
-                AND query.channel_pricing_id = $channelPricingId
-            ORDER BY query.id DESC
-            LIMIT 1
-        ";
+        if ($withIsDiscountedCondition) {
+            return <<<SQL
+SELECT
+    scp.id,
+    CASE
+        WHEN scp.original_price IS NULL OR scp.price >= scp.original_price THEN NULL
+        ELSE ($baseQuery)
+    END AS lowestPriceInPeriod
+FROM sylius_channel_pricing scp
+SQL;
+        }
 
-        return sprintf(
-            'SELECT (%s) price FROM (SELECT (%s) lowestPriceSetInPeriod, (%s) latestPriceSetBeyondPeriod) t',
-            $selectLowestPriceBeforeDiscount,
-            $lowestPriceSetInPeriod,
-            $latestPriceSetBeyondPeriod,
-        );
+        return "SELECT scp.id, ($baseQuery) lowestPriceInPeriod FROM sylius_channel_pricing scp";
     }
 }
