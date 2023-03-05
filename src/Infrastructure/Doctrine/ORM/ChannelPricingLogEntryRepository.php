@@ -50,25 +50,30 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
     {
         $conn = $this->getEntityManager()->getConnection();
 
-        $sql = $this->getLowestPricesBeforeDiscountQuery(false);
-        $sql .= ' WHERE scp.channel_code = :channelCode';
-
-        $result = $conn
-            ->prepare($sql)
-            ->executeQuery([
-                'lowestPriceForDiscountedProductsCheckingPeriod' => $channel->getLowestPriceForDiscountedProductsCheckingPeriod(),
-                'channelCode' => $channel->getCode(),
-            ])
-            ->fetchAllAssociative()
+        $channelPricingIds = $conn
+            ->prepare('SELECT id FROM sylius_channel_pricing WHERE channel_code = :channelCode')
+            ->executeQuery(['channelCode' => $channel->getCode()])
+            ->fetchFirstColumn()
         ;
 
-        $updateStmt = $conn->prepare('UPDATE sylius_channel_pricing SET lowestPriceBeforeDiscount = :lowestPriceBeforeDiscount WHERE id = :id');
+        foreach ($channelPricingIds as $channelPricingId) {
+            $lowestPriceBeforeDiscount = $conn
+                ->prepare($this->getLowestPricesBeforeDiscountQuery(true))
+                ->executeQuery([
+                    'lowestPriceForDiscountedProductsCheckingPeriod' => $channel->getLowestPriceForDiscountedProductsCheckingPeriod(),
+                    'channelPricingId' => $channelPricingId,
+                ])
+                ->fetchOne()
+            ;
 
-        foreach ($result as $row) {
-            $updateStmt->executeQuery([
-                'lowestPriceBeforeDiscount' => $row['lowestPriceInPeriod'],
-                'id' => $row['id'],
-            ]);
+            // TODO: Fetch all `id => lowestPriceBeforeDiscount` and update in one query
+            $conn
+                ->prepare('UPDATE sylius_channel_pricing SET lowestPriceBeforeDiscount = :lowestPriceBeforeDiscount WHERE id = :id')
+                ->executeQuery([
+                    'lowestPriceBeforeDiscount' => $lowestPriceBeforeDiscount,
+                    'id' => $channelPricingId,
+                ])
+            ;
         }
     }
 
@@ -79,7 +84,6 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
         $conn = $this->getEntityManager()->getConnection();
 
         $sql = $this->getLowestPricesBeforeDiscountQuery(false);
-        $sql .= ' WHERE scp.id = :channelPricingId';
 
         $result = $conn
             ->prepare($sql)
@@ -87,15 +91,15 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
                 'lowestPriceForDiscountedProductsCheckingPeriod' => $lowestPriceForDiscountedProductsCheckingPeriod,
                 'channelPricingId' => $channelPricing->getId(),
             ])
-            ->fetchAllAssociative()[0] ?? null
+            ->fetchOne()
         ;
 
-        if (!isset($result['lowestPriceInPeriod'])) {
+        if (null === $result || false === $result) {
             return null;
         }
 
         /** @phpstan-ignore-next-line cast mixed to int */
-        return (int) $result['lowestPriceInPeriod'];
+        return (int) $result;
     }
 
     private function getLowestPricesBeforeDiscountQuery(bool $withIsDiscountedCondition): string
@@ -119,7 +123,7 @@ FROM (
                     (
                         SELECT o.logged_at
                         FROM sylius_price_history_channel_pricing_log_entry o
-                        WHERE o.channel_pricing_id = scp.id
+                        WHERE o.channel_pricing_id = :channelPricingId
                         ORDER BY o.id DESC
                         LIMIT 1
                     ),
@@ -127,11 +131,11 @@ FROM (
                 )
                 AND query.id != (
                     SELECT subquery.id FROM sylius_price_history_channel_pricing_log_entry subquery
-                    WHERE subquery.channel_pricing_id = scp.id
+                    WHERE subquery.channel_pricing_id = :channelPricingId
                     ORDER BY subquery.id DESC
                     LIMIT 1
                 )
-                AND query.channel_pricing_id = scp.id
+                AND query.channel_pricing_id = :channelPricingId
              ORDER BY query.price ASC
              LIMIT 1
          ) lowestPriceSetInPeriod,
@@ -143,13 +147,13 @@ FROM (
                     (
                         SELECT o.logged_at
                         FROM sylius_price_history_channel_pricing_log_entry o
-                        WHERE o.channel_pricing_id = scp.id
+                        WHERE o.channel_pricing_id = :channelPricingId
                         ORDER BY o.id DESC
                         LIMIT 1
                     ),
                     :lowestPriceForDiscountedProductsCheckingPeriod
                 )
-                AND query.channel_pricing_id = scp.id
+                AND query.channel_pricing_id = :channelPricingId
              ORDER BY query.id DESC
              LIMIT 1
          ) latestPriceSetBeyondPeriod
@@ -159,7 +163,6 @@ SQL;
         if ($withIsDiscountedCondition) {
             return <<<SQL
 SELECT
-    scp.id,
     CASE
         WHEN scp.original_price IS NULL OR scp.price >= scp.original_price THEN NULL
         ELSE ($baseQuery)
@@ -168,6 +171,6 @@ FROM sylius_channel_pricing scp
 SQL;
         }
 
-        return "SELECT scp.id, ($baseQuery) lowestPriceInPeriod FROM sylius_channel_pricing scp";
+        return $baseQuery;
     }
 }
