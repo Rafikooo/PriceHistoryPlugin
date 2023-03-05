@@ -50,16 +50,26 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
     {
         $conn = $this->getEntityManager()->getConnection();
 
-        $sql = sprintf(
-            'UPDATE sylius_channel_pricing xd_a INNER JOIN (%s) xd_b ON xd_a.id = xd_b.id SET xd_a.lowestPriceBeforeDiscount = xd_b.lowestPriceInPeriod',
-            $this->getLowestPricesBeforeDiscountQuery(true) . ' WHERE scp.channel_code = :channelCode',
-        );
+        $sql = $this->getLowestPricesBeforeDiscountQuery(false);
+        $sql .= ' WHERE scp.channel_code = :channelCode';
 
-        $stmt = $conn->prepare($sql);
-        $stmt->executeQuery([
-            'lowestPriceForDiscountedProductsCheckingPeriod' => $channel->getLowestPriceForDiscountedProductsCheckingPeriod(),
-            'channelCode' => $channel->getCode(),
-        ]);
+        $result = $conn
+            ->prepare($sql)
+            ->executeQuery([
+                'lowestPriceForDiscountedProductsCheckingPeriod' => $channel->getLowestPriceForDiscountedProductsCheckingPeriod(),
+                'channelCode' => $channel->getCode(),
+            ])
+            ->fetchAllAssociative()
+        ;
+
+        $updateStmt = $conn->prepare('UPDATE sylius_channel_pricing SET lowestPriceBeforeDiscount = :lowestPriceBeforeDiscount WHERE id = :id');
+
+        foreach ($result as $row) {
+            $updateStmt->executeQuery([
+                'lowestPriceBeforeDiscount' => $row['lowestPriceInPeriod'],
+                'id' => $row['id'],
+            ]);
+        }
     }
 
     public function findLowestPriceBeforeDiscount(
