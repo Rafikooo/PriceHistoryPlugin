@@ -50,18 +50,18 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
     {
         $conn = $this->getEntityManager()->getConnection();
 
-        $channelPricingIds = $conn
+        $channelPricingInChannelIds = $conn
             ->prepare('SELECT id FROM sylius_channel_pricing WHERE channel_code = :channelCode')
             ->executeQuery(['channelCode' => $channel->getCode()])
             ->fetchFirstColumn()
         ;
 
-        foreach ($channelPricingIds as $channelPricingId) {
+        foreach ($channelPricingInChannelIds as $channelPricingInChannelId) {
             $lowestPriceBeforeDiscount = $conn
                 ->prepare($this->getLowestPricesBeforeDiscountQuery(true))
                 ->executeQuery([
                     'lowestPriceForDiscountedProductsCheckingPeriod' => $channel->getLowestPriceForDiscountedProductsCheckingPeriod(),
-                    'channelPricingId' => $channelPricingId,
+                    'channelPricingId' => $channelPricingInChannelId,
                 ])
                 ->fetchOne()
             ;
@@ -71,7 +71,7 @@ class ChannelPricingLogEntryRepository extends EntityRepository implements Chann
                 ->prepare('UPDATE sylius_channel_pricing SET lowestPriceBeforeDiscount = :lowestPriceBeforeDiscount WHERE id = :id')
                 ->executeQuery([
                     'lowestPriceBeforeDiscount' => $lowestPriceBeforeDiscount,
-                    'id' => $channelPricingId,
+                    'id' => $channelPricingInChannelId,
                 ])
             ;
         }
